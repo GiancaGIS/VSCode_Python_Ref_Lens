@@ -1,0 +1,8 @@
+.vscode/**
+src/**
+examples/**
+tests/**
+docs/**
+tsconfig.json
+.gitignore
+*.vsix

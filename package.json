@@ -1,0 +1,62 @@
+{
+  "name": "python-reference-lens",
+  "displayName": "Python Reference Lens",
+  "description": "Shows Python reference counts above functions and methods using the active VS Code reference provider (for example Pylance).",
+  "version": "1.0.0",
+  "publisher": "GiancaGIS",
+  "icon": "media/icon.png",
+  "keywords": [
+    "python",
+    "references",
+    "codelens",
+    "pylance"
+  ],
+  "private": true,
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:python"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "pythonReferenceLens.refresh",
+        "title": "Python Reference Lens: Refresh"
+      }
+    ],
+    "configuration": {
+      "title": "Python Reference Lens",
+      "properties": {
+        "pythonReferenceLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show reference CodeLens entries above Python functions and methods."
+        },
+        "pythonReferenceLens.showZeroReferences": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show CodeLens entries for symbols with zero references."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "test": "npm run compile && node --test tests/*.test.cjs",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.100.0",
+    "@vscode/vsce": "^4.0.0",
+    "typescript": "^5.9.2"
+  }
+}
