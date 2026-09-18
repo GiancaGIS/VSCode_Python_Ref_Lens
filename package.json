@@ -1,9 +1,13 @@
 {
   "name": "python-reference-lens",
   "displayName": "Python Reference Lens",
-  "description": "Shows Python reference counts above functions and methods using the active VS Code reference provider (for example Pylance).",
+  "description": "Shows Python references, calls, test/production counts, implementations and incoming call hierarchy above functions and methods.",
   "version": "1.0.0",
   "publisher": "GiancaGIS",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GiancaGIS/VSCode_Python_Ref_Lens.git"
+  },
   "icon": "media/icon.png",
   "keywords": [
     "python",
@@ -41,7 +45,65 @@
         "pythonReferenceLens.showZeroReferences": {
           "type": "boolean",
           "default": true,
-          "description": "Show CodeLens entries for symbols with zero references."
+          "description": "Show CodeLens entries with zero results, including calls, other references, implementations and callers."
+        },
+        "pythonReferenceLens.showCalls": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show separate call-site and other-reference counts using the language provider's incoming call hierarchy."
+        },
+        "pythonReferenceLens.showReferenceBreakdown": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show production and test counts in the total references lens."
+        },
+        "pythonReferenceLens.testFilePatterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/{test,tests}/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"],
+          "scope": "resource",
+          "description": "Case-sensitive glob patterns identifying test files. Match paths relative to each caller's workspace folder (absolute paths outside the workspace), using forward slashes. Nonmatching files count as production."
+        },
+        "pythonReferenceLens.showImplementations": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show implementations and overrides reported by the language provider."
+        },
+        "pythonReferenceLens.showIncomingCalls": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the number of distinct callers with a link to VS Code's incoming call hierarchy."
+        },
+        "pythonReferenceLens.peekStyle": {
+          "type": "string",
+          "enum": ["theme", "accented", "contrast", "custom"],
+          "enumDescriptions": [
+            "Use the original theme and restore colors previously changed by this extension.",
+            "Accent the border and title while keeping the theme's code and list backgrounds.",
+            "Use distinct backgrounds, a visible border and stronger selection highlights.",
+            "Start from Contrast and override individual colors with Peek Colors."
+          ],
+          "default": "theme",
+          "scope": "window",
+          "markdownDescription": "Style the native reference/code popup. Adapts to light, dark and high-contrast themes. Requires an open folder/workspace. Writes theme-specific `workbench.colorCustomizations` at workspace scope, affecting **all native Peek views in this window**, including other languages. Choose `theme` to restore previous colors."
+        },
+        "pythonReferenceLens.peekColors": {
+          "type": "object",
+          "default": {},
+          "scope": "window",
+          "additionalProperties": false,
+          "markdownDescription": "Color overrides when `#pythonReferenceLens.peekStyle#` is `custom`. Unspecified colors use the Contrast preset for the current theme. Use hex colors; a translucent value such as `#FFD43B33` is recommended for matchBackground. Code syntax colors remain controlled by the editor theme.",
+          "properties": {
+            "border": { "type": "string", "format": "color-hex", "description": "Popup outline and match outline." },
+            "titleBackground": { "type": "string", "format": "color-hex", "description": "Title bar background." },
+            "titleForeground": { "type": "string", "format": "color-hex", "description": "Title and description text." },
+            "editorBackground": { "type": "string", "format": "color-hex", "description": "Code preview and line number gutter background." },
+            "resultsBackground": { "type": "string", "format": "color-hex", "description": "Reference list background." },
+            "resultForeground": { "type": "string", "format": "color-hex", "description": "File names and reference snippets." },
+            "selectionBackground": { "type": "string", "format": "color-hex", "description": "Selected reference background." },
+            "selectionForeground": { "type": "string", "format": "color-hex", "description": "Selected reference text." },
+            "matchBackground": { "type": "string", "format": "color-hex", "description": "Match highlighting in code and results. Prefer a translucent hex color." }
+          }
         }
       }
     }
@@ -52,6 +114,9 @@
     "test": "npm run compile && node --test tests/*.test.cjs",
     "watch": "tsc -watch -p ./",
     "package": "vsce package"
+  },
+  "dependencies": {
+    "minimatch": "^10.2.6"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

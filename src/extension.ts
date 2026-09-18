@@ -1,4 +1,20 @@
 import * as vscode from 'vscode';
+import { minimatch } from 'minimatch';
+import { PeekAppearance } from './peekAppearance';
+
+type LensKind = 'references' | 'calls' | 'otherReferences' | 'implementations' | 'incoming';
+interface IncomingSummary {
+    calls: vscode.Location[];
+    callers: vscode.Location[];
+}
+interface Results {
+    references: vscode.Location[];
+    implementations: vscode.Location[];
+    incoming: IncomingSummary;
+}
+const defaultTestFilePatterns = [
+    '**/{test,tests}/**', '**/test_*.py', '**/*_test.py', '**/conftest.py'
+];
 
 interface LensData {
     uri: vscode.Uri;
@@ -10,7 +26,8 @@ interface LensData {
 class PythonReferenceCodeLens extends vscode.CodeLens {
     constructor(
         range: vscode.Range,
-        public readonly data: LensData
+        public readonly data: LensData,
+        public readonly kind: LensKind
     ) {
         super(range);
     }
@@ -20,8 +37,8 @@ class PythonReferenceLensProvider implements vscode.CodeLensProvider, vscode.Dis
     private readonly changeEmitter = new vscode.EventEmitter<void>();
     public readonly onDidChangeCodeLenses = this.changeEmitter.event;
 
-    private readonly cache = new Map<string, vscode.Location[]>();
-    private readonly pending = new Map<string, Promise<vscode.Location[] | undefined>>();
+    private readonly cache = new Map<string, Results[keyof Results]>();
+    private readonly pending = new Map<string, Promise<Results[keyof Results] | undefined>>();
     private generation = 0;
     private refreshTimer: ReturnType<typeof setTimeout> | undefined;
     private disposed = false;
@@ -125,12 +142,7 @@ class PythonReferenceLensProvider implements vscode.CodeLensProvider, vscode.Dis
                 }
 
                 const position = symbol.location.range.start;
-                lenses.push(
-                    new PythonReferenceCodeLens(new vscode.Range(position, position), {
-                        ...snapshot,
-                        position
-                    })
-                );
+                this.addLenses({ ...snapshot, position }, lenses);
             }
         }
 
@@ -146,64 +158,157 @@ class PythonReferenceLensProvider implements vscode.CodeLensProvider, vscode.Dis
             return codeLens;
         }
 
-        const { uri, position } = codeLens.data;
-        const references = await this.getReferences(codeLens.data);
+        const { data, kind } = codeLens;
+        let locations: vscode.Location[] | undefined;
+        let label: string;
+        let unavailable: string;
+        let tooltip: string;
+        switch (kind) {
+            case 'references':
+                locations = await this.getReferences(data);
+                label = 'reference';
+                unavailable = 'References unavailable';
+                tooltip = 'Show all references';
+                break;
+            case 'implementations':
+                locations = await this.getImplementations(data);
+                label = 'implementation / override';
+                unavailable = 'Implementations unavailable';
+                tooltip = 'Show implementations and overrides reported by the language provider';
+                break;
+            case 'incoming':
+            case 'calls': {
+                const incoming = await this.getIncoming(data);
+                locations = kind === 'calls' ? incoming?.calls : incoming?.callers;
+                label = kind === 'calls' ? 'call' : 'caller';
+                unavailable = kind === 'calls' ? 'Calls unavailable' : 'Call hierarchy unavailable';
+                tooltip = kind === 'calls' ? 'Show call sites reported by the language provider' : 'Open incoming call hierarchy';
+                break;
+            }
+            case 'otherReferences': {
+                const [references, incoming] = await Promise.all([
+                    this.getReferences(data), this.getIncoming(data)
+                ]);
+                if (references !== undefined && incoming !== undefined) {
+                    const callsByUri = new Map<string, vscode.Range[]>();
+                    for (const call of incoming.calls) {
+                        const key = call.uri.toString();
+                        const ranges = callsByUri.get(key) ?? [];
+                        ranges.push(call.range);
+                        callsByUri.set(key, ranges);
+                    }
+                    locations = references.filter(reference =>
+                        !(callsByUri.get(reference.uri.toString()) ?? []).some(range =>
+                            this.rangesOverlap(reference.range, range))
+                    );
+                }
+                label = 'other reference';
+                unavailable = 'Other references unavailable';
+                tooltip = 'Show references not identified as call sites by the language provider';
+                break;
+            }
+        }
 
-        if (token.isCancellationRequested || !this.isCurrent(codeLens.data)) {
+        if (token.isCancellationRequested || !this.isCurrent(data)) {
             return codeLens;
         }
-        if (references === undefined) {
+        if (locations === undefined) {
             codeLens.command = {
-                title: 'References unavailable',
-                tooltip: 'Click to retry. See the Python Reference Lens output for details.',
+                title: unavailable,
+                tooltip: 'The provider may not support this feature. Click to retry; see the Python Reference Lens output for details.',
                 command: 'pythonReferenceLens.refresh'
             };
             return codeLens;
         }
 
-        const config = vscode.workspace.getConfiguration('pythonReferenceLens', uri);
-        const showZeroReferences = config.get<boolean>('showZeroReferences', true);
-
-        if (references.length === 0 && !showZeroReferences) {
-            codeLens.command = {
-                title: '',
-                command: ''
-            };
+        const config = vscode.workspace.getConfiguration('pythonReferenceLens', data.uri);
+        if (locations.length === 0 && !config.get<boolean>('showZeroReferences', true)) {
+            codeLens.command = { title: '', command: '' };
             return codeLens;
         }
 
-        const title =
-            references.length === 1
-                ? '1 reference'
-                : `${references.length} references`;
-
+        const plural = kind === 'implementations' ? 'implementations / overrides' : `${label}s`;
+        let title = `${locations.length} ${locations.length === 1 ? label : plural}`;
+        if (kind === 'references' && config.get<boolean>('showReferenceBreakdown', true)) {
+            const tests = locations.filter(location => this.isTestFile(location.uri)).length;
+            title += ` (${locations.length - tests} production, ${tests} test)`;
+            tooltip += '; test files are classified using pythonReferenceLens.testFilePatterns';
+        }
         codeLens.command = {
             title,
-            tooltip:
-                references.length === 0
-                    ? 'No references found by the active Python language provider'
-                    : 'Show references',
-            command: 'editor.action.showReferences',
-            arguments: [uri, position, references]
+            tooltip,
+            command: kind === 'incoming' ? 'pythonReferenceLens.showIncomingCalls' : 'editor.action.showReferences',
+            arguments: kind === 'incoming' ? [data] : [data.uri, data.position, locations]
         };
-
         return codeLens;
     }
 
-    private async getReferences(data: LensData): Promise<vscode.Location[] | undefined> {
+    public async showIncomingCalls(data?: LensData): Promise<void> {
+        // The cursor may have moved since the lens was clicked. Always anchor the
+        // native hierarchy to the selected symbol, and explicitly choose incoming.
+        if (!data || !this.isCurrent(data)) {
+            return;
+        }
+        try {
+            await vscode.window.showTextDocument(data.uri, {
+                selection: new vscode.Range(data.position, data.position), preview: true
+            });
+            if (!this.isCurrent(data)) {
+                return;
+            }
+            await vscode.commands.executeCommand('editor.showCallHierarchy');
+            await vscode.commands.executeCommand('editor.showIncomingCalls');
+        } catch (error) {
+            this.logError('Incoming call hierarchy', error);
+            void vscode.window.showErrorMessage('Unable to open incoming calls. See the Python Reference Lens output for details.');
+        }
+    }
+
+    private isTestFile(uri: vscode.Uri): boolean {
+        // Resolve settings in the caller's folder, including multi-root workspaces.
+        const config = vscode.workspace.getConfiguration('pythonReferenceLens', uri);
+        const patterns = config.get<string[]>('testFilePatterns', defaultTestFilePatterns);
+        const path = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/');
+        return patterns.some(pattern => minimatch(path, pattern, { dot: true, nonegate: true, nocomment: true }));
+    }
+
+    private async getResult<K extends keyof Results>(
+        data: LensData, operation: K, fetch: () => Promise<Results[K] | undefined>
+    ): Promise<Results[K] | undefined> {
         const { uri, position, documentVersion, generation } = data;
-        const key = `${generation}::${uri.toString()}::${documentVersion}::${position.line}:${position.character}`;
-        const cached = this.cache.get(key);
+        const key = `${operation}::${generation}::${uri.toString()}::${documentVersion}::${position.line}:${position.character}`;
+        const cached = this.cache.get(key) as Results[K] | undefined;
         if (cached !== undefined) {
             return cached;
         }
         const existing = this.pending.get(key);
         if (existing) {
-            return existing;
+            return existing as Promise<Results[K] | undefined>;
         }
 
         // Cancellation belongs to each lens, not to this shared provider request.
-        const request = this.fetchReferences(data);
+        const request = (async () => {
+            try {
+                const result = await fetch();
+                if (!this.isCurrent(data)) {
+                    return undefined;
+                }
+                if (result === undefined) {
+                    this.logError(operation, 'The language provider returned no result or does not support this feature.');
+                    return undefined;
+                }
+                // Bound memory usage across all provider operations.
+                if (this.cache.size >= 500) {
+                    const oldestKey = this.cache.keys().next().value;
+                    if (oldestKey !== undefined) this.cache.delete(oldestKey);
+                }
+                this.cache.set(key, result);
+                return result;
+            } catch (error) {
+                this.logError(operation, error);
+                return undefined;
+            }
+        })();
         this.pending.set(key, request);
         try {
             return await request;
@@ -214,33 +319,68 @@ class PythonReferenceLensProvider implements vscode.CodeLensProvider, vscode.Dis
         }
     }
 
-    private async fetchReferences(data: LensData): Promise<vscode.Location[] | undefined> {
-        try {
+    private getReferences(data: LensData): Promise<vscode.Location[] | undefined> {
+        return this.getResult(data, 'references', async () => {
             const locations = await vscode.commands.executeCommand<vscode.Location[]>(
                 'vscode.executeReferenceProvider', data.uri, data.position
             );
-            if (!this.isCurrent(data)) {
-                return undefined;
-            }
-            if (locations === undefined) {
-                this.logError('References', 'The language provider returned no result.');
-                return undefined;
-            }
-            const references = this.deduplicateLocations(locations);
-            const { uri, position, documentVersion, generation } = data;
-            const key = `${generation}::${uri.toString()}::${documentVersion}::${position.line}:${position.character}`;
-            // Bound memory usage when browsing many documents without editing them.
-            if (this.cache.size >= 500) {
-                const oldestKey = this.cache.keys().next().value;
-                if (oldestKey !== undefined) {
-                    this.cache.delete(oldestKey);
-                }
-            }
-            this.cache.set(key, references);
-            return references;
-        } catch (error) {
-            this.logError('References', error);
-            return undefined;
+            return locations && this.deduplicateLocations(locations.filter(location => !this.isDeclaration(location, data)));
+        });
+    }
+
+    private getImplementations(data: LensData): Promise<vscode.Location[] | undefined> {
+        return this.getResult(data, 'implementations', async () => {
+            const targets = await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[]>(
+                'vscode.executeImplementationProvider', data.uri, data.position
+            );
+            return targets && this.deduplicateLocations(targets.map(target =>
+                'targetUri' in target
+                    ? new vscode.Location(target.targetUri, target.targetSelectionRange ?? target.targetRange)
+                    : target
+            ).filter(location => !this.isDeclaration(location, data)));
+        });
+    }
+
+    private getIncoming(data: LensData): Promise<IncomingSummary | undefined> {
+        return this.getResult(data, 'incoming', async () => {
+            const items = await vscode.commands.executeCommand<vscode.CallHierarchyItem[]>(
+                'vscode.prepareCallHierarchy', data.uri, data.position
+            );
+            if (!items?.length || !this.isCurrent(data)) return undefined;
+            const results = await Promise.all(items.map(item =>
+                vscode.commands.executeCommand<vscode.CallHierarchyIncomingCall[]>('vscode.provideIncomingCalls', item)
+            ));
+            // A partial response cannot establish a reliable count.
+            if (results.some(result => result === undefined)) return undefined;
+            const incoming = results.flatMap(result => result ?? []);
+            return {
+                calls: this.deduplicateLocations(incoming.flatMap(call =>
+                    call.fromRanges.map(range => new vscode.Location(call.from.uri, range))
+                )),
+                callers: this.deduplicateLocations(incoming.map(call =>
+                    new vscode.Location(call.from.uri, call.from.selectionRange)
+                ))
+            };
+        });
+    }
+
+    private isDeclaration(location: vscode.Location, data: LensData): boolean {
+        return location.uri.toString() === data.uri.toString() && location.range.contains(data.position);
+    }
+
+    private rangesOverlap(first: vscode.Range, second: vscode.Range): boolean {
+        return first.start.isBefore(second.end) && second.start.isBefore(first.end) ||
+            first.start.isEqual(second.start);
+    }
+
+    private addLenses(data: LensData, lenses: vscode.CodeLens[]): void {
+        const config = vscode.workspace.getConfiguration('pythonReferenceLens', data.uri);
+        const kinds: LensKind[] = ['references'];
+        if (config.get<boolean>('showCalls', true)) kinds.push('calls', 'otherReferences');
+        if (config.get<boolean>('showImplementations', true)) kinds.push('implementations');
+        if (config.get<boolean>('showIncomingCalls', true)) kinds.push('incoming');
+        for (const kind of kinds) {
+            lenses.push(new PythonReferenceCodeLens(new vscode.Range(data.position, data.position), data, kind));
         }
     }
 
@@ -255,12 +395,7 @@ class PythonReferenceLensProvider implements vscode.CodeLensProvider, vscode.Dis
                 // a better semantic lookup position than the beginning of `def`.
                 const position = symbol.selectionRange.start;
 
-                lenses.push(
-                    new PythonReferenceCodeLens(new vscode.Range(position, position), {
-                        ...snapshot,
-                        position
-                    })
-                );
+                this.addLenses({ ...snapshot, position }, lenses);
             }
 
             if (symbol.children.length > 0) {
@@ -302,14 +437,19 @@ class PythonReferenceLensProvider implements vscode.CodeLensProvider, vscode.Dis
     }
 }
 
+let peekAppearance: PeekAppearance | undefined;
+
 export function activate(context: vscode.ExtensionContext): void {
     const output = vscode.window.createOutputChannel('Python Reference Lens');
     const provider = new PythonReferenceLensProvider(output);
     const watcher = vscode.workspace.createFileSystemWatcher('**/*.{py,pyi,pyw}');
+    peekAppearance = new PeekAppearance(context.workspaceState, output);
+    void peekAppearance.sync();
 
     context.subscriptions.push(
         output,
         provider,
+        peekAppearance,
         watcher,
         watcher.onDidCreate(() => provider.scheduleRefresh()),
         watcher.onDidChange(() => provider.scheduleRefresh()),
@@ -319,6 +459,7 @@ export function activate(context: vscode.ExtensionContext): void {
             provider
         ),
         vscode.commands.registerCommand('pythonReferenceLens.refresh', () => provider.refresh()),
+        vscode.commands.registerCommand('pythonReferenceLens.showIncomingCalls', (data?: LensData) => provider.showIncomingCalls(data)),
         vscode.workspace.onDidChangeTextDocument(event => {
             if (event.document.languageId === 'python' && event.contentChanges.length > 0) {
                 provider.scheduleRefresh();
@@ -343,6 +484,8 @@ export function activate(context: vscode.ExtensionContext): void {
     );
 }
 
-export function deactivate(): void {
-    // All disposables are owned by ExtensionContext.
+export async function deactivate(): Promise<void> {
+    // Await settings restoration; the journal also covers interrupted shutdowns.
+    await peekAppearance?.restore();
+    peekAppearance = undefined;
 }

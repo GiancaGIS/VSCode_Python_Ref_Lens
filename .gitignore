@@ -3,5 +3,4 @@ out/
 *.vsix
 package-lock.json
 /docs
-CHANGELOG.md
 /.vscode

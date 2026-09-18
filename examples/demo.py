@@ -6,6 +6,13 @@ class Calculator:
         print("Nobody calls me")
 
 
+class VerboseCalculator(Calculator):
+    def add(self, a: int, b: int) -> int:
+        result = super().add(a, b)
+        print(f"Total: {result}")
+        return result
+
+
 def greet(name: str) -> str:
     return f"Hello {name}"
 
